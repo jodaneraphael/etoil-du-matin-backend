@@ -1,0 +1,19 @@
+node_modules/
+dist/
+*.log
+
+# Locally uploaded admin media (product images) — never commit
+uploads/
+
+# NOTE: drizzle/meta/ is deliberately NOT ignored. Drizzle diffs the schema
+# against the snapshot in that folder, so a new machine that lacks it will
+# generate an empty or duplicate migration instead of a correct delta.
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
+coverage/
+.vscode/
+.idea/
