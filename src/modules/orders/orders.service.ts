@@ -17,6 +17,8 @@ import { safeEqual, sha256 } from "../../lib/ids.js";
 import { logger } from "../../lib/logger.js";
 import { formatMoney } from "../../lib/money.js";
 import { stripe, toPaymentError } from "../../lib/stripe.js";
+import { markRefunded } from "../payments/webhook.service.js";
+import { forwardFulfillment } from "./forward.service.js";
 
 /**
  * Order reads and admin mutations.
@@ -482,16 +484,36 @@ export const updateFulfillment = async (
     );
   }
 
+  /**
+   * Forwarding is an *action*, not just a state change: it hands the order to
+   * the supplier over their configured channel (email / webhook / api). The
+   * dispatch writes the terminal status — `forwarded` on delivery, `failed`
+   * with the reason when the supplier could not be reached — and bumps
+   * `attempts`, so the row is re-read to return what actually happened rather
+   * than the optimistic `forwarded` this request asked for.
+   */
+  let final = row;
+  if (status === "forwarded") {
+    await forwardFulfillment(fulfillmentId);
+    const [fresh] = await db
+      .select({ row: orderFulfillments, supplierName: suppliers.name })
+      .from(orderFulfillments)
+      .leftJoin(suppliers, eq(orderFulfillments.supplierId, suppliers.id))
+      .where(eq(orderFulfillments.id, fulfillmentId))
+      .limit(1);
+    if (fresh) final = fresh;
+  }
+
   return {
-    id: row.row.id,
-    supplierId: row.row.supplierId,
-    supplierName: row.supplierName,
-    status: row.row.status,
-    trackingNumber: row.row.trackingNumber,
-    trackingCarrier: row.row.trackingCarrier,
-    attempts: row.row.attempts,
-    lastError: row.row.lastError,
-    needsSupplierAssignment: row.supplierName === null,
+    id: final.row.id,
+    supplierId: final.row.supplierId,
+    supplierName: final.supplierName,
+    status: final.row.status,
+    trackingNumber: final.row.trackingNumber,
+    trackingCarrier: final.row.trackingCarrier,
+    attempts: final.row.attempts,
+    lastError: final.row.lastError,
+    needsSupplierAssignment: final.supplierName === null,
   };
 };
 
@@ -572,7 +594,7 @@ export const refundOrder = async (
   try {
     // Scoped by order id so a key reused across two orders cannot make Stripe
     // return one order's refund in response to another's request.
-    return await stripe.refunds.create(
+    const refund = await stripe.refunds.create(
       {
         payment_intent: payment.stripePaymentIntentId,
         amount: amountCents,
@@ -584,6 +606,34 @@ export const refundOrder = async (
           : `${orderId}:refund:${order.refundedCents + amountCents}`,
       },
     );
+
+    /**
+     * Reflect the refund on the local ledger immediately.
+     *
+     * Normally the `charge.refunded` webhook does this, but a webhook cannot
+     * reach a localhost backend during development, so without this an operator
+     * refunds money and the console still shows the full amount as refundable —
+     * it looks broken. Reading the cumulative charge back from Stripe and
+     * applying the same `markRefunded` the webhook uses keeps one reconciliation
+     * path: the later webhook delivery is then a harmless no-op (the status and
+     * amounts are already set), and a partial refund is recorded by its running
+     * total exactly as the webhook would.
+     *
+     * Best-effort and non-fatal: the refund itself has already succeeded at
+     * Stripe, which is the fact that matters, so a failure here is logged and the
+     * webhook (in production) remains the backstop.
+     */
+    const chargeId = typeof refund.charge === "string" ? refund.charge : refund.charge?.id;
+    if (chargeId) {
+      try {
+        const charge = await stripe.charges.retrieve(chargeId);
+        await markRefunded(charge);
+      } catch (error) {
+        logger.warn({ err: error, orderId }, "could not reconcile the refund locally");
+      }
+    }
+
+    return refund;
   } catch (error) {
     throw toPaymentError(error);
   }

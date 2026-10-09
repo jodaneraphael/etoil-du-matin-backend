@@ -14,6 +14,7 @@ import {
   refundSchema,
 } from "../schemas.js";
 import * as orders from "./orders.service.js";
+import { reconcileOrderPayment } from "../payments/webhook.service.js";
 
 /**
  * Order endpoints, split by audience.
@@ -102,6 +103,34 @@ guestOrdersRouter.post(
   asyncHandler(async (req, res) => {
     const { userId } = requireAuthContext(req);
     res.json(await orders.claimGuestOrder(userId, req.body.orderNumber, req.body.email, req.body.claimToken));
+  }),
+);
+
+/**
+ * Reconcile an order's payment with Stripe.
+ *
+ * The confirmation page calls this while it polls, because the order only moves
+ * to `paid` via the `payment_intent.succeeded` webhook — which cannot reach a
+ * localhost backend, and whose secret here is a placeholder rather than a real
+ * `whsec_…`. Without this, a genuinely-charged test payment sits on
+ * "Confirming your payment…" indefinitely. It retrieves the intent from Stripe
+ * and runs the same settlement the webhook runs, so it is safe to call
+ * repeatedly and safe to race the webhook (the status write is guarded).
+ *
+ * Anonymous and idempotent: it can only ever settle an order whose intent Stripe
+ * reports as `succeeded` for the exact stored amount, so it grants no access and
+ * reveals nothing beyond the caller already holding the order number.
+ */
+const reconcileParamsSchema = z.object({ orderNumber: orderNumberSchema }).strict();
+
+guestOrdersRouter.post(
+  "/:orderNumber/reconcile",
+  readLimiter,
+  validateRequest({ params: reconcileParamsSchema }),
+  asyncHandler(async (req, res) => {
+    const { orderNumber } = req.params as unknown as { orderNumber: string };
+    const status = await reconcileOrderPayment(orderNumber);
+    res.json({ status });
   }),
 );
 

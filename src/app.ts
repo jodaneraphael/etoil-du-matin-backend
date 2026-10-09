@@ -13,6 +13,7 @@ import { checkoutRouter } from "./modules/checkout/checkout.routes.js";
 import { contactRouter } from "./modules/contact/contact.routes.js";
 import { ordersRouter } from "./modules/orders/orders.routes.js";
 import { adminOrdersRouter, guestOrdersRouter } from "./modules/orders/orders.routes.js";
+import { supplierRouter } from "./modules/orders/supplier.routes.js";
 import { webhookRouter } from "./modules/payments/webhook.routes.js";
 import { wishlistRouter } from "./modules/wishlist/wishlist.routes.js";
 
@@ -140,6 +141,9 @@ export const createApp = (): Express => {
   app.use("/api/orders", guestOrdersRouter);
   app.use("/api/orders", ordersRouter);
   app.use("/api/admin/orders", adminOrdersRouter);
+  // Supplier status callbacks. Authenticated per-fulfillment by the token handed
+  // out at forward time, not by a session — suppliers are external systems.
+  app.use("/api/supplier", supplierRouter);
   // Registered after the orders router so `/api/admin/orders/*` keeps resolving
   // to the order console; this one owns products, suppliers, customers and
   // analytics under `/api/admin/*`.

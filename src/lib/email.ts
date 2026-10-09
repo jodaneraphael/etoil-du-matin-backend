@@ -68,3 +68,60 @@ export const sendShippingUpdate = async (to: string, orderNumber: string, tracki
   const html = '<p>Your order <strong>' + orderNumber + '</strong> has shipped.</p><p>Tracking: <strong>' + carrier + ' - ' + trackingNumber + '</strong></p><p>You can track your delivery using the provided tracking number.</p>';
   return sendEmail({ to, subject, text, html });
 };
+/**
+ * Purchase order sent to a supplier.
+ *
+ * This is the "forward" in dropshipping: the supplier receives the order they
+ * must pick, pack and ship. Before this existed, marking a fulfillment
+ * `forwarded` only changed a column — nobody was actually told, so the order sat
+ * in a queue the supplier never saw.
+ *
+ * Deliberately plain text plus a simple HTML table: a supplier's inbox is a
+ * business system, and the parseable facts (order number, reference, the exact
+ * lines, the ship-to) matter more than presentation. `reference` is the
+ * idempotency token, so a supplier that deduplicates will not receive the same
+ * order twice if a forward is retried.
+ */
+export interface SupplierPurchaseOrder {
+  supplierName: string;
+  orderNumber: string;
+  reference: string;
+  items: { name: string; sku: string | null; quantity: number }[];
+  shipTo: string;
+  callbackUrl: string;
+  token: string;
+}
+
+export const sendSupplierPurchaseOrder = async (to: string, po: SupplierPurchaseOrder): Promise<boolean> => {
+  const lines = po.items.map((i) => '  - ' + i.quantity + ' x ' + i.name + (i.sku ? ' (' + i.sku + ')' : '')).join('\n');
+  const subject = 'Purchase order ' + po.orderNumber + ' (' + po.reference + ')';
+  const text =
+    'Hello ' + po.supplierName + ',\n\n' +
+    'Please fulfil the following order.\n\n' +
+    'Order: ' + po.orderNumber + '\n' +
+    'Reference: ' + po.reference + '\n\n' +
+    'Items:\n' + lines + '\n\n' +
+    'Ship to:\n' + po.shipTo + '\n\n' +
+    'When it ships, report the status and tracking number to:\n' +
+    po.callbackUrl + '\n' +
+    'with the header  X-EDM-Token: ' + po.token + '\n';
+
+  const rows = po.items
+    .map((i) => '<tr><td>' + i.quantity + '</td><td>' + i.name + '</td><td>' + (i.sku ?? '') + '</td></tr>')
+    .join('');
+  const html =
+    '<p>Hello <strong>' + po.supplierName + '</strong>,</p>' +
+    '<p>Please fulfil order <strong>' + po.orderNumber + '</strong> (reference ' + po.reference + ').</p>' +
+    '<table cellpadding="6" style="border-collapse:collapse"><thead><tr><th align="left">Qty</th><th align="left">Item</th><th align="left">SKU</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+    '<p><strong>Ship to:</strong><br>' + po.shipTo.replace(/\n/g, '<br>') + '</p>' +
+    '<p>Report shipping status and tracking to <code>' + po.callbackUrl + '</code> with header <code>X-EDM-Token: ' + po.token + '</code>.</p>';
+
+  return sendEmail({ to, subject, text, html });
+};
+
+export const sendDeliveredUpdate = async (to: string, orderNumber: string): Promise<boolean> => {
+  const subject = 'Your order ' + orderNumber + ' was delivered';
+  const text = 'Your order ' + orderNumber + ' has been marked delivered. We hope you love it.';
+  const html = '<p>Your order <strong>' + orderNumber + '</strong> has been marked delivered. We hope you love it.</p>';
+  return sendEmail({ to, subject, text, html });
+};

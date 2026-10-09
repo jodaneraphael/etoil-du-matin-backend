@@ -279,7 +279,7 @@ const cancelPaymentIntent = async (intent: Stripe.PaymentIntent): Promise<void> 
  * as `refunded` would tell the customer the money was all back when they still
  * owed the balance.
  */
-const markRefunded = async (charge: Stripe.Charge): Promise<void> => {
+export const markRefunded = async (charge: Stripe.Charge): Promise<void> => {
   const paymentIntentId = typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent?.id;
   if (!paymentIntentId) return;
 
@@ -367,5 +367,64 @@ export const processEvent = async (event: Stripe.Event): Promise<WebhookOutcome>
     // be retried by Stripe rather than silently accepted.
     logger.error({ err: error, stripeEventId: event.id, type: event.type }, "stripe event processing failed");
     throw error;
+  }
+};
+/**
+ * Settle an order by asking Stripe directly about its PaymentIntent.
+ *
+ * The order only becomes `paid` through the `payment_intent.succeeded` webhook,
+ * which is correct in production but a dead end in local development: Stripe
+ * cannot deliver a webhook to `localhost`, and this project's `STRIPE_WEBHOOK_SECRET`
+ * is a placeholder rather than a real `whsec_…`, so `constructEvent` would reject
+ * the delivery even if one arrived. The result is a shopper whose card was
+ * genuinely charged watching "Confirming your payment…" forever.
+ *
+ * This closes that gap without weakening anything: it retrieves the intent from
+ * Stripe and runs the *same* `settleOrder` the webhook runs, so both paths share
+ * one reconciliation — amount check, guarded status write, receipt email — and
+ * are safe to run in either order or twice. `settleOrder` is a no-op when the
+ * order is already paid, and the guarded `UPDATE ... WHERE status = 'pending_payment'`
+ * means a late webhook cannot move a settled order backwards.
+ *
+ * Returns the order's status after the attempt. `missing` means the number is
+ * unknown or has no payment row yet.
+ */
+export const reconcileOrderPayment = async (
+  orderNumber: string,
+): Promise<"paid" | "pending" | "missing"> => {
+  const [order] = await db.select().from(orders).where(eq(orders.orderNumber, orderNumber)).limit(1);
+  if (!order) return "missing";
+
+  // Already settled (by a webhook, a prior reconcile, or a refund): nothing to do.
+  if (order.status === "paid" || order.status === "partially_refunded" || order.status === "refunded") {
+    return "paid";
+  }
+  if (order.status !== "pending_payment" && order.status !== "failed") {
+    return "pending";
+  }
+
+  const [payment] = await db.select().from(payments).where(eq(payments.orderId, order.id)).limit(1);
+  if (!payment) return "missing";
+
+  let intent: Stripe.PaymentIntent;
+  try {
+    intent = await stripe.paymentIntents.retrieve(payment.stripePaymentIntentId);
+  } catch (error) {
+    // A transient Stripe failure is not a reason to fail the caller; the next
+    // poll (or the webhook) will retry.
+    logger.warn({ err: error, orderNumber }, "could not retrieve payment intent for reconciliation");
+    return "pending";
+  }
+
+  if (intent.status !== "succeeded") return "pending";
+
+  try {
+    await settleOrder(intent);
+    return "paid";
+  } catch (error) {
+    // `settleOrder` throws on an amount mismatch or a missing row — a genuine
+    // fault that should be visible, not silently reported as success.
+    logger.error({ err: error, orderNumber }, "payment reconciliation could not settle the order");
+    return "pending";
   }
 };
