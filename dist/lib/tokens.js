@@ -26,12 +26,17 @@ const MAX_REFRESH_MS = env.refreshTokenTtlDays * 24 * 60 * 60 * 1000;
  * secure      — HTTPS only in production.
  * path        — restricts transmission to /api/auth, so the credential is not
  *               attached to every catalogue request or leaked in access logs.
+ * domain      — set to `COOKIE_DOMAIN` so the cookie is shared across the SPA
+ *               and API subdomains; blank keeps it host-only (localhost,
+ *               same-origin). Without this the SPA cannot read `edm_csrf` and
+ *               the double-submit check fails with 403 on every refresh.
  */
 const REFRESH_COOKIE_OPTIONS = {
     httpOnly: true,
     sameSite: "strict",
     secure: env.isProduction,
     path: "/api/auth",
+    domain: env.cookieDomain,
 };
 export const setAuthCookies = (res, tokens) => {
     res.cookie(REFRESH_COOKIE, tokens.refreshToken, { ...REFRESH_COOKIE_OPTIONS, maxAge: MAX_REFRESH_MS });
@@ -40,6 +45,7 @@ export const setAuthCookies = (res, tokens) => {
         sameSite: "strict",
         secure: env.isProduction,
         path: "/",
+        domain: env.cookieDomain,
         maxAge: MAX_REFRESH_MS,
     });
 };

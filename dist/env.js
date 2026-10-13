@@ -91,6 +91,26 @@ const schema = z.object({
     apiPublicUrl: optionalUrl.default("http://localhost:4000"),
     corsOrigins: z.string().default("http://localhost:5173"),
     trustProxy: booleanFromEnv(false),
+    /**
+     * Domain attribute for the auth cookies (refresh + CSRF).
+     *
+     * When the SPA and the API are on different subdomains
+     * (`etoile-dumatin.com` vs `api.etoile-dumatin.com`), a host-only cookie set by
+     * the API is invisible to `document.cookie` on the SPA's origin. The CSRF
+     * double-submit depends on the SPA reading `edm_csrf`, so without a shared
+     * domain the header is never populated and every refresh is a 403. Setting
+     * this to the registrable domain (e.g. `.etoile-dumatin.com`) makes the cookie
+     * visible on every subdomain. Left blank, cookies stay host-only — correct for
+     * localhost and for same-origin deployments.
+     */
+    cookieDomain: z
+        .string()
+        .default("")
+        .transform((v) => {
+        const trimmed = v.trim();
+        return trimmed ? unquote(trimmed) : undefined;
+    })
+        .refine((v) => v === undefined || /^\.?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(v), { message: "COOKIE_DOMAIN must look like a domain, e.g. .etoile-dumatin.com" }),
     databaseUrl: z
         .string({ required_error: "DATABASE_URL is required" })
         .refine((v) => /^mysql:\/\//.test(v), { message: "DATABASE_URL must be a mysql:// connection string" }),
@@ -222,6 +242,7 @@ const ENV_KEYS = {
     apiPublicUrl: "API_PUBLIC_URL",
     corsOrigins: "CORS_ORIGINS",
     trustProxy: "TRUST_PROXY",
+    cookieDomain: "COOKIE_DOMAIN",
     databaseUrl: "DATABASE_URL",
     dbPoolSize: "DB_POOL_SIZE",
     databaseSslCa: "DATABASE_SSL_CA",
@@ -271,6 +292,7 @@ export const env = Object.freeze({
     apiPublicUrl: raw.apiPublicUrl,
     corsOrigins: raw.corsOrigins,
     trustProxy: raw.trustProxy,
+    cookieDomain: raw.cookieDomain,
     databaseUrl: raw.databaseUrl,
     dbPoolSize: raw.dbPoolSize,
     databaseSslCa: raw.databaseSslCa,
