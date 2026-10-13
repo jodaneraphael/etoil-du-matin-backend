@@ -20,7 +20,7 @@ CREATE TABLE `cart_items` (
 	`user_id` char(26) NOT NULL,
 	`product_id` char(26) NOT NULL,
 	`variant_id` char(26),
-	`variant_key` char(26) GENERATED ALWAYS AS (CASE WHEN variant_id IS NULL THEN '__________________________' ELSE variant_id END) VIRTUAL,
+	`variant_key` char(26) GENERATED ALWAYS AS (COALESCE(variant_id,'')) VIRTUAL,
 	`quantity` smallint unsigned NOT NULL,
 	`created_at` timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 	`updated_at` timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
