@@ -94,8 +94,10 @@ const booleanFromEnv = (fallback: boolean) =>
 
 const stripeKey = (label: string) =>
   z
-    .string({ required_error: `${label} is required` })
-    .refine((v) => /^(sk|pk)_(test|live)_[A-Za-z0-9]{8,}$/.test(v.trim()), {
+    .string()
+    .default("")
+    .transform((v) => v.trim())
+    .refine((v) => v === "" || /^(sk|pk)_(test|live)_[A-Za-z0-9]{8,}$/.test(v), {
       message: `${label} does not look like a Stripe key (expected sk_ or pk_ followed by test or live)`,
     });
 
@@ -190,7 +192,13 @@ const schema = z.object({
   orderSweepIntervalMs: intFromEnv("ORDER_SWEEP_INTERVAL_MS", 300_000, 30_000, 3_600_000),
 
   stripeSecretKey: stripeKey("STRIPE_SECRET_KEY"),
-  stripeWebhookSecret: secret("STRIPE_WEBHOOK_SECRET", 16),
+  stripeWebhookSecret: z
+    .string()
+    .default("")
+    .transform((v) => v.trim())
+    .refine((v) => v === "" || v.length >= 16, {
+      message: "STRIPE_WEBHOOK_SECRET must be at least 16 characters",
+    }),
   stripePublishableKey: stripeKey("STRIPE_PUBLISHABLE_KEY"),
   storeCurrency: z
     .string()
@@ -372,7 +380,7 @@ export const env = Object.freeze({
     if (raw.nodeEnv !== "production") return;
 
     const problems: string[] = [];
-    if (!raw.stripeSecretKey.trim().startsWith("sk_live_")) {
+    if (raw.stripeSecretKey && !raw.stripeSecretKey.startsWith("sk_live_")) {
       problems.push("STRIPE_SECRET_KEY must be a live key (sk_live_...) in production");
     }
     if (corsOriginList.some((o) => o === "*" || o.includes("localhost") || o.includes("127.0.0.1"))) {

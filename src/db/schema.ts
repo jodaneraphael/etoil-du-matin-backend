@@ -465,7 +465,7 @@ export const cartItems = mysqlTable(
      * number of NULL rows, because NULLs never compare equal. Coalescing to ''
      * means one cart line per product for variant-less products.
      */
-    variantKey: char("variant_key", { length: 26 }).generatedAlwaysAs(sql`IFNULL(variant_id, '')`, {
+    variantKey: char("variant_key", { length: 26 }).generatedAlwaysAs(sql`CASE WHEN variant_id IS NULL THEN '' ELSE variant_id END`, {
       mode: "virtual",
     }),
     quantity: smallint("quantity", { unsigned: true }).notNull(),
