@@ -1,6 +1,12 @@
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
-import { cartItems, productVariants, products, type ProductVariant } from "../../db/schema.js";
+import {
+  cartItems,
+  productVariants,
+  products,
+  VARIANT_KEY_NONE,
+  type ProductVariant,
+} from "../../db/schema.js";
 import { badRequest, notFound } from "../../lib/errors.js";
 import { newId } from "../../lib/ids.js";
 import { computeTotals, priceLine, type OrderTotals, type PriceLine } from "../../lib/money.js";
@@ -322,6 +328,10 @@ export const addLine = async (
         userId,
         productId,
         variantId: variantId ?? null,
+        // Application-maintained uniqueness key; see `VARIANT_KEY_NONE`. The
+        // DB default covers this too, but setting it explicitly keeps the write
+        // path honest and independent of DDL defaults.
+        variantKey: variantId ?? VARIANT_KEY_NONE,
         quantity: added,
       })
       .onDuplicateKeyUpdate({
@@ -476,6 +486,10 @@ export const mergeIntoUserCart = async (
           userId,
           productId: resolved.line.productId,
           variantId: resolved.line.variantId,
+          // Same application-maintained uniqueness key as `addLine`. A merged
+          // variant-less line must land on the same sentinel the account cart
+          // already uses, or the unique index would not merge the quantities.
+          variantKey: resolved.line.variantId ?? VARIANT_KEY_NONE,
           quantity,
         })
         .onDuplicateKeyUpdate({

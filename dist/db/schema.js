@@ -54,6 +54,14 @@ export const SUBCATEGORIES = [
     "beauty",
 ];
 export const BADGES = ["Best Seller", "New", "Limited", "Sale"];
+/**
+ * Sentinel stored in `cart_items.variant_key` for a line that names no variant.
+ *
+ * 26 underscores, matching the column width. Underscore is not in the ULID
+ * Crockford base32 alphabet, so this can never equal a real `product_variants.id`
+ * and therefore cannot suppress a legitimate cart line via the unique index.
+ */
+export const VARIANT_KEY_NONE = "_".repeat(26);
 const id = () => char("id", { length: 26 }).primaryKey();
 /**
  * Timestamps are UTC everywhere, and that is enforced at the connection rather
@@ -367,30 +375,31 @@ export const cartItems = mysqlTable("cart_items", {
     /** Null line = any variant, for products with a single configuration. */
     variantId: char("variant_id", { length: 26 }),
     /**
-     * Generated so the uniqueness rule below actually holds.
+     * Plain, application-maintained surrogate for `variant_id` in the unique
+     * index below. It is deliberately NOT a generated column.
      *
-     * MySQL treats every NULL as distinct in a unique index, so a unique index on
-     * (user_id, product_id, variant_id) would happily accept unlimited rows for
-     * a product that has no variant — the exact case where duplicates are most
-     * likely. Collapsing NULL to '' in a generated column makes those rows
-     * collide as intended. Generated rather than maintained in application code
-     * so the database is the single authority.
-     */
-    /**
-     * Must stay VIRTUAL, never STORED. MySQL refuses to add a foreign key to any
-     * table that contains a STORED generated column (ER_CANNOT_ADD_FOREIGN), and
-     * `cart_items` needs an FK on `variant_id` for `ON DELETE CASCADE`. VIRTUAL
-     * columns carry no such restriction and are still indexable, so the unique
-     * constraint below works.
+     * MariaDB's generated-column support is too restrictive to rely on here. A
+     * STORED expression that takes a fixed-length `char` argument (as
+     * `variant_id` is) is rejected outright with error 1901 — see MDEV-29777,
+     * where `CONCAT(char_col, ...)` STORED fails on 10.9 while the same
+     * expression VIRTUAL succeeds. The earlier `CASE WHEN variant_id IS NULL ...`
+     * form was rejected for the same class of reason. Making it VIRTUAL instead
+     * only moves the problem: MySQL/MariaDB impose further restrictions when a
+     * table carries both a generated column and a foreign key, and `cart_items`
+     * needs its `variant_id` FK for `ON DELETE CASCADE`.
      *
      * The column exists to make a nullable `variant_id` participate in a unique
      * index: a plain `UNIQUE(user_id, product_id, variant_id)` would permit any
-     * number of NULL rows, because NULLs never compare equal. Coalescing to ''
-     * means one cart line per product for variant-less products.
+     * number of NULL rows, because NULLs never compare equal. Coalescing NULL to
+     * a reserved sentinel makes those rows collide as intended.
+     *
+     * `VARIANT_KEY_NONE` is 26 underscores. That value can never collide with a
+     * real variant id: ids are ULIDs, whose Crockford base32 alphabet (`0-9` and
+     * `A-Z` minus I, L, O, U) does not contain `_`. The DEFAULT is a belt-and-
+     * braces backstop for any insert path that forgets the column; the service
+     * layers set it explicitly.
      */
-    variantKey: char("variant_key", { length: 26 }).generatedAlwaysAs(sql `COALESCE(variant_id,'')`, {
-        mode: "stored",
-    }),
+    variantKey: char("variant_key", { length: 26 }).notNull().default(VARIANT_KEY_NONE),
     quantity: smallint("quantity", { unsigned: true }).notNull(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
