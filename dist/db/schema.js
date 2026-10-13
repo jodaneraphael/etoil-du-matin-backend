@@ -389,7 +389,7 @@ export const cartItems = mysqlTable("cart_items", {
      * means one cart line per product for variant-less products.
      */
     variantKey: char("variant_key", { length: 26 }).generatedAlwaysAs(sql `COALESCE(variant_id,'')`, {
-        mode: "virtual",
+        mode: "stored",
     }),
     quantity: smallint("quantity", { unsigned: true }).notNull(),
     createdAt: createdAt(),
