@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Router } from "express";
+import { env } from "../../env.js";
 import { badRequest } from "../../lib/errors.js";
 import { newId } from "../../lib/ids.js";
 import { requireAdmin, requireAuth } from "../../middleware/auth.js";
@@ -58,7 +59,12 @@ adminMediaRouter.post("/", writeLimiter, asyncHandler(async (req, res) => {
     const filename = `${newId()}.${ext}`;
     await mkdir(MEDIA_ROOT, { recursive: true });
     await writeFile(join(MEDIA_ROOT, filename), payload);
-    const proto = req.get("x-forwarded-proto") ?? req.protocol;
-    res.status(201).json({ url: `${proto}://${req.get("host")}/uploads/${filename}` });
+    // Build the public URL from configuration, never from request headers.
+    // Behind LiteSpeed + Passenger, `X-Forwarded-Proto` arrives as a
+    // comma-joined list ("https, https"), so interpolating it produced
+    // "https, https://host/..." — a relative URL that 404s against the SPA.
+    // `API_PUBLIC_URL` is the same canonical base the webhook and supplier
+    // callback URLs already use.
+    res.status(201).json({ url: `${env.apiPublicUrl}/uploads/${filename}` });
 }));
 //# sourceMappingURL=media.routes.js.map
