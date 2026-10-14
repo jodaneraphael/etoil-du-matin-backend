@@ -119,7 +119,9 @@ const schema = z.object({
    * domain the header is never populated and every refresh is a 403. Setting
    * this to the registrable domain (e.g. `.etoile-dumatin.com`) makes the cookie
    * visible on every subdomain. Left blank, cookies stay host-only — correct for
-   * localhost and for same-origin deployments.
+   * localhost and for same-origin deployments. The common `api.<site>` layout is
+   * detected automatically (see `deriveCookieDomain`); set this explicitly for
+   * any other arrangement.
    */
   cookieDomain: z
     .string()
@@ -335,13 +337,66 @@ if (!parsed.success) {
 const raw = parsed.data;
 const corsOriginList = csvList.parse(raw.corsOrigins);
 
+/** Lower-cased hostname of an absolute URL, or undefined if it cannot be parsed. */
+const hostOf = (value: string | undefined): string | undefined => {
+  if (!value) return undefined;
+  try {
+    return new URL(value).hostname.toLowerCase();
+  } catch {
+    return undefined;
+  }
+};
+
+/** Hosts for which a `Domain` attribute makes no sense (or is invalid). */
+const isLocalHost = (host: string): boolean =>
+  host === "localhost" ||
+  host === "127.0.0.1" ||
+  host === "::1" ||
+  host.endsWith(".localhost") ||
+  /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host);
+
+const labelCount = (host: string): number => host.split(".").length;
+
+/**
+ * Work out the shared `Domain` for the auth cookies.
+ *
+ * When the SPA is served from `etoile-dumatin.com` and calls an API at
+ * `api.etoile-dumatin.com`, a host-only cookie set by the API is invisible to
+ * `document.cookie` on the SPA. The double-submit CSRF check needs the SPA to
+ * read `edm_csrf`, so without a shared domain the `X-CSRF-Token` header is never
+ * populated and every `/api/auth/refresh` is rejected with a 403.
+ *
+ * Only the unambiguous case is auto-derived: the API host must be the SPA host
+ * with exactly one extra leading label (`api.<site>`). Anything else — deeper
+ * nesting, unrelated hosts, or a public-suffix domain like `co.uk` where a naive
+ * "last two labels" guess would be wrong — is left host-only and must be set
+ * explicitly via `COOKIE_DOMAIN`. An explicit value always wins.
+ */
+const deriveCookieDomain = (explicit: string | undefined): string | undefined => {
+  if (explicit) return explicit;
+
+  const apiHost = hostOf(raw.apiPublicUrl);
+  if (!apiHost || isLocalHost(apiHost)) return undefined;
+
+  for (const origin of corsOriginList) {
+    const webHost = hostOf(origin);
+    if (!webHost || isLocalHost(webHost) || webHost === apiHost) continue;
+    if (apiHost.endsWith(`.${webHost}`) && labelCount(apiHost) === labelCount(webHost) + 1) {
+      return `.${webHost}`;
+    }
+  }
+  return undefined;
+};
+
+const derivedCookieDomain = deriveCookieDomain(raw.cookieDomain);
+
 export const env = Object.freeze({
   nodeEnv: raw.nodeEnv,
   port: raw.port,
   apiPublicUrl: raw.apiPublicUrl,
   corsOrigins: raw.corsOrigins,
   trustProxy: raw.trustProxy,
-  cookieDomain: raw.cookieDomain,
+  cookieDomain: derivedCookieDomain,
 
   databaseUrl: raw.databaseUrl,
   dbPoolSize: raw.dbPoolSize,
