@@ -43,6 +43,13 @@
       "when": 1791912315158,
       "tag": "0005_cart_variant_key",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "5",
+      "when": 1792009000000,
+      "tag": "0006_fix_nullable_timestamps",
+      "breakpoints": true
     }
   ]
 }
