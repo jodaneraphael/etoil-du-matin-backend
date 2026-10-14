@@ -14,6 +14,7 @@ import {
   revokeAllForUser,
   revokeByToken,
   rotateRefreshToken,
+  rotateRefreshTokens,
   setAuthCookies,
   type ClientFingerprint,
   type IssuedTokens,
@@ -97,7 +98,7 @@ export interface AuthResult {
  * Re-exported so the routes treat this module as the single auth boundary
  * instead of reaching into `lib/tokens.js` alongside it.
  */
-export { clearAuthCookies, revokeByToken, rotateRefreshToken, setAuthCookies };
+export { clearAuthCookies, revokeByToken, rotateRefreshToken, rotateRefreshTokens, setAuthCookies };
 export type { RotationResult };
 
 const findByEmail = async (email: string): Promise<User | undefined> => {

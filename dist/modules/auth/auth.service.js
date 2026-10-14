@@ -8,7 +8,7 @@ import { AppError, conflict, invalidCredentials, isDuplicateEntry, notFound, too
 import { newId, safeEqual, sha256 } from "../../lib/ids.js";
 import { logger, maskEmail } from "../../lib/logger.js";
 import { fakeVerify, hashPassword, verifyPassword } from "../../lib/password.js";
-import { clearAuthCookies, issueTokens, revokeAllForUser, revokeByToken, rotateRefreshToken, setAuthCookies, } from "../../lib/tokens.js";
+import { clearAuthCookies, issueTokens, revokeAllForUser, revokeByToken, rotateRefreshToken, rotateRefreshTokens, setAuthCookies, } from "../../lib/tokens.js";
 /**
  * Progressive per-account lockout.
  *
@@ -59,7 +59,7 @@ export const toPublicUser = (user) => ({
  * Re-exported so the routes treat this module as the single auth boundary
  * instead of reaching into `lib/tokens.js` alongside it.
  */
-export { clearAuthCookies, revokeByToken, rotateRefreshToken, setAuthCookies };
+export { clearAuthCookies, revokeByToken, rotateRefreshToken, rotateRefreshTokens, setAuthCookies };
 const findByEmail = async (email) => {
     const [row] = await db.select().from(users).where(eq(users.email, email)).limit(1);
     return row;

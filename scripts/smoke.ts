@@ -248,6 +248,35 @@ section("csrf");
       headers: { cookie: `edm_rt=${rt2}; edm_csrf=${csrf2}`, "x-csrf-token": csrf! },
     });
     check("stale CSRF after rotation is 403", staleCsrf.status === 403, `status ${staleCsrf.status}`);
+
+    // A browser that straddled the shared-domain cookie change sends a stale
+    // host-only `edm_rt`/`edm_csrf` pair ahead of the live domain-scoped pair.
+    // `req.cookies` exposes only the first of each, so the server must scan all
+    // candidates and act on the live refresh token instead of logging the user
+    // out over the dead one.
+    const dupLogin = await fetch(`${B}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const dupSet = dupLogin.headers.getSetCookie();
+    const drtA = dupSet.find((c) => c.startsWith("edm_rt="))?.split(";")[0]?.split("=")[1];
+    const dcsrfA = dupSet.find((c) => c.startsWith("edm_csrf="))?.split(";")[0]?.split("=")[1];
+    const dupRotate = await fetch(`${B}/api/auth/refresh`, {
+      method: "POST",
+      headers: { cookie: `edm_rt=${drtA}; edm_csrf=${dcsrfA}`, "x-csrf-token": dcsrfA! },
+    });
+    const dupSet2 = dupRotate.headers.getSetCookie();
+    const drtB = dupSet2.find((c) => c.startsWith("edm_rt="))?.split(";")[0]?.split("=")[1];
+    const dcsrfB = dupSet2.find((c) => c.startsWith("edm_csrf="))?.split(";")[0]?.split("=")[1];
+    const dup = await fetch(`${B}/api/auth/refresh`, {
+      method: "POST",
+      headers: {
+        cookie: `edm_rt=${drtA}; edm_rt=${drtB}; edm_csrf=${dcsrfA}; edm_csrf=${dcsrfB}`,
+        "x-csrf-token": dcsrfA!,
+      },
+    });
+    check("duplicate edm_rt rotates the live token", dup.status === 200, `status ${dup.status}`);
   }
 }
 

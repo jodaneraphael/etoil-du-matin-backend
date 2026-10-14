@@ -1,7 +1,7 @@
 import { env } from "../env.js";
 import { hmacSha256, safeEqual } from "../lib/ids.js";
 import { forbidden } from "../lib/errors.js";
-import { CSRF_COOKIE, REFRESH_COOKIE } from "../lib/tokens.js";
+import { CSRF_COOKIE, refreshTokenCandidates } from "../lib/tokens.js";
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const CSRF_HEADER = "x-csrf-token";
 /**
@@ -41,14 +41,24 @@ export const mintCsrfToken = (refreshToken) => hmacSha256(env.csrfSecret, `${CSR
 export const requireCsrf = (req, _res, next) => {
     if (SAFE_METHODS.has(req.method))
         return next();
-    const refreshCookie = req.cookies?.[REFRESH_COOKIE];
     const csrfCookie = req.cookies?.[CSRF_COOKIE];
     const header = req.get(CSRF_HEADER);
-    if (!refreshCookie || !csrfCookie || !header) {
+    /**
+     * Accept the header against *any* refresh cookie the client sent.
+     *
+     * A browser that straddled the shared-domain cookie change sends a stale
+     * host-only token first and the live domain-scoped token second; both are in
+     * the header, but `req.cookies` only exposes the first. Testing the header
+     * against every candidate means the live pair is recognised as legitimate
+     * instead of being rejected as a mismatch — the rotation endpoint then acts on
+     * the live token (see `refreshTokenCandidates`).
+     */
+    const candidates = refreshTokenCandidates(req);
+    if (candidates.length === 0 || !csrfCookie || !header) {
         return next(forbidden("CSRF token is required for this request."));
     }
-    const expected = mintCsrfToken(String(refreshCookie));
-    if (!safeEqual(String(csrfCookie), header) || !safeEqual(expected, header)) {
+    const expected = candidates.some((refreshToken) => safeEqual(String(csrfCookie), header) && safeEqual(mintCsrfToken(refreshToken), header));
+    if (!expected) {
         return next(forbidden("CSRF token mismatch."));
     }
     next();

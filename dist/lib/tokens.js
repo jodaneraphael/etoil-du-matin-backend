@@ -1,4 +1,4 @@
-import { and, eq, isNotNull, isNull, lt } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, lt } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { refreshTokens, sessions, users } from "../db/schema.js";
 import { env } from "../env.js";
@@ -14,6 +14,47 @@ export const REFRESH_COOKIE = "edm_rt";
  * refresh endpoint can perform a double-submit check.
  */
 export const CSRF_COOKIE = "edm_csrf";
+/**
+ * Every value the client sent for `edm_rt`, in header order.
+ *
+ * `req.cookies` is not enough. `cookie-parser` collapses duplicate names to the
+ * **first** one, and a browser that logged in before the shared `COOKIE_DOMAIN`
+ * change holds a host-only `edm_rt` *and* the newer domain-scoped one. The
+ * host-only copy is sent first, so the parser would hand the server a token that
+ * was already rotated away from — surfacing as a spurious "already been used"
+ * and logging the user out on every load.
+ *
+ * Reading the raw header recovers all of them so the caller can act on whichever
+ * is actually live. A stale duplicate therefore stops being fatal without
+ * weakening reuse detection: a request carrying only revoked tokens still has no
+ * active candidate and is still rejected.
+ */
+export const refreshTokenCandidates = (req) => {
+    const values = [];
+    const raw = req.headers?.cookie;
+    if (raw) {
+        for (const part of raw.split(";")) {
+            const eq = part.indexOf("=");
+            if (eq === -1)
+                continue;
+            if (part.slice(0, eq).trim() !== REFRESH_COOKIE)
+                continue;
+            let value = part.slice(eq + 1).trim();
+            try {
+                value = decodeURIComponent(value);
+            }
+            catch {
+                // A malformed escape is left as-is; the hash lookup simply will not match.
+            }
+            if (value && !values.includes(value))
+                values.push(value);
+        }
+    }
+    const fallback = req.cookies?.[REFRESH_COOKIE];
+    if (typeof fallback === "string" && fallback && !values.includes(fallback))
+        values.push(fallback);
+    return values;
+};
 const MAX_REFRESH_MS = env.refreshTokenTtlDays * 24 * 60 * 60 * 1000;
 /** Shared `Domain`, or nothing when cookies should stay host-only. */
 const SHARED_DOMAIN = env.cookieDomain ? { domain: env.cookieDomain } : {};
@@ -62,6 +103,10 @@ const clearHostOnlyVariants = (res) => {
     if (!env.cookieDomain)
         return;
     res.clearCookie(REFRESH_COOKIE, { ...REFRESH_COOKIE_OPTIONS, domain: undefined });
+    // The refresh cookie's path is `/api/auth` today, but a copy left under `/`
+    // by an older build would not be matched by the clear above and would keep
+    // shadowing the shared-domain cookie. Clear both spellings.
+    res.clearCookie(REFRESH_COOKIE, { ...REFRESH_COOKIE_OPTIONS, domain: undefined, path: "/" });
     res.clearCookie(CSRF_COOKIE, { ...CSRF_COOKIE_OPTIONS, domain: undefined });
 };
 export const setAuthCookies = (res, tokens) => {
@@ -155,8 +200,22 @@ export const revokeFamilyById = async (familyId, reason) => {
  * requests could both read a valid token and both mint successors, which would
  * defeat rotation entirely and re-open the replay window.
  */
-export const rotateRefreshToken = async (presentedToken, client) => {
-    const presentedHash = sha256(presentedToken);
+export const rotateRefreshToken = async (presentedToken, client) => rotateRefreshTokens([presentedToken], client);
+/**
+ * Rotate whichever of the presented tokens is currently live.
+ *
+ * Almost always there is exactly one. The list form exists for the duplicate
+ * cookie case documented on `refreshTokenCandidates`: a stale host-only token
+ * rides alongside the live domain-scoped one, and choosing by header order would
+ * pick the dead one. Selecting the active candidate makes that benign.
+ *
+ * Reuse detection is unchanged. If none of the candidates is active — the normal
+ * case for a genuinely replayed token — the family is revoked exactly as before.
+ */
+export const rotateRefreshTokens = async (presentedTokens, client) => {
+    const hashes = [...new Set(presentedTokens.filter((token) => token.length > 0).map(sha256))];
+    if (hashes.length === 0)
+        throw unauthorized("Refresh token is not recognised.");
     /**
      * The transaction returns a failure *value* instead of throwing.
      *
@@ -169,24 +228,30 @@ export const rotateRefreshToken = async (presentedToken, client) => {
      * transaction, once the family is durably dead.
      */
     const outcome = await db.transaction(async (tx) => {
-        const [row] = await tx
+        const rows = await tx
             .select()
             .from(refreshTokens)
-            .where(eq(refreshTokens.tokenHash, presentedHash))
-            .limit(1)
+            .where(inArray(refreshTokens.tokenHash, hashes))
             .for("update");
+        const now = Date.now();
+        const row = rows.find((candidate) => candidate.revokedAt === null && candidate.expiresAt.getTime() > now);
         if (!row) {
+            // No live token among the candidates. Prefer the theft signal: a revoked
+            // token means this is a replay, and the whole family must die. Only when
+            // nothing is revoked is this an ordinary expiry.
+            const revoked = rows.find((candidate) => candidate.revokedAt !== null);
+            if (revoked) {
+                await revokeFamily(tx, revoked.familyId, "reuse_detected");
+                logger.warn({ familyId: revoked.familyId, userId: revoked.userId }, "refresh token reuse detected; family revoked");
+                return { ok: false, reason: "reuse" };
+            }
+            const expired = rows.find((candidate) => candidate.expiresAt.getTime() <= now);
+            if (expired) {
+                await revokeFamily(tx, expired.familyId, "expired");
+                return { ok: false, reason: "expired" };
+            }
             // Never issued, or already purged. Reject without revealing which.
             return { ok: false, reason: "unrecognised" };
-        }
-        if (row.revokedAt !== null) {
-            await revokeFamily(tx, row.familyId, "reuse_detected");
-            logger.warn({ familyId: row.familyId, userId: row.userId }, "refresh token reuse detected; family revoked");
-            return { ok: false, reason: "reuse" };
-        }
-        if (row.expiresAt.getTime() <= Date.now()) {
-            await revokeFamily(tx, row.familyId, "expired");
-            return { ok: false, reason: "expired" };
         }
         const [user] = await tx
             .select({ id: users.id, email: users.email, name: users.name, role: users.role })

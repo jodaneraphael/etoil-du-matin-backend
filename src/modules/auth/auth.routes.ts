@@ -4,7 +4,7 @@ import { requireAuth } from "../../middleware/auth.js";
 import { authLimiter, refreshLimiter, registerLimiter, writeLimiter } from "../../middleware/security.js";
 import { asyncHandler, params, requireAuthContext, validateRequest } from "../../middleware/validate.js";
 import { AppError, invalidCredentials } from "../../lib/errors.js";
-import { REFRESH_COOKIE } from "../../lib/tokens.js";
+import { refreshTokenCandidates } from "../../lib/tokens.js";
 import * as auth from "./auth.service.js";
 import {
   addressParamsSchema,
@@ -77,12 +77,14 @@ authRouter.post(
   requireCsrf,
   refreshLimiter,
   asyncHandler(async (req, res) => {
-    const token = req.cookies?.[REFRESH_COOKIE];
-    if (typeof token !== "string" || token.length === 0) {
+    // Prefer whichever `edm_rt` is live: a straddling browser may send a stale
+    // host-only copy ahead of the shared-domain one. See `refreshTokenCandidates`.
+    const candidates = refreshTokenCandidates(req);
+    if (candidates.length === 0) {
       throw invalidCredentials();
     }
 
-    const result = await auth.rotateRefreshToken(token, fingerprintOf(req));
+    const result = await auth.rotateRefreshTokens(candidates, fingerprintOf(req));
     auth.setAuthCookies(res, result.tokens);
     res.json({ user: result.user, accessToken: result.tokens.accessToken });
   }),
@@ -92,9 +94,9 @@ authRouter.post(
   "/logout",
   requireCsrf,
   asyncHandler(async (req, res) => {
-    const token = req.cookies?.[REFRESH_COOKIE];
     // Idempotent: signing out twice, or with an expired cookie, is a success.
-    if (typeof token === "string" && token.length > 0) {
+    // Revoke every candidate so a stale duplicate cannot keep a session alive.
+    for (const token of refreshTokenCandidates(req)) {
       await auth.revokeByToken(token);
     }
     auth.clearAuthCookies(res);
