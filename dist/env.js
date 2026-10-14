@@ -101,7 +101,9 @@ const schema = z.object({
      * domain the header is never populated and every refresh is a 403. Setting
      * this to the registrable domain (e.g. `.etoile-dumatin.com`) makes the cookie
      * visible on every subdomain. Left blank, cookies stay host-only — correct for
-     * localhost and for same-origin deployments.
+     * localhost and for same-origin deployments. The common `api.<site>` layout is
+     * detected automatically (see `deriveCookieDomain`); set this explicitly for
+     * any other arrangement.
      */
     cookieDomain: z
         .string()
@@ -151,6 +153,15 @@ const schema = z.object({
     rateLimitGlobalWindowMs: intFromEnv("RATE_LIMIT_GLOBAL_WINDOW_MS", 60_000, 1_000, 86_400_000),
     rateLimitAuthMax: intFromEnv("RATE_LIMIT_AUTH_MAX", 10, 1, 1_000_000),
     rateLimitAuthWindowMs: intFromEnv("RATE_LIMIT_AUTH_WINDOW_MS", 900_000, 1_000, 86_400_000),
+    /**
+     * Refresh-token rotation runs on every page load (the SPA silently restores
+     * the session), so it must not share the tight credential bucket above — a
+     * normal browsing session would spend the login budget and lock out sign-in.
+     * The token is 256-bit and CSRF-guarded, so this ceiling is DoS protection,
+     * not guess resistance.
+     */
+    rateLimitRefreshMax: intFromEnv("RATE_LIMIT_REFRESH_MAX", 60, 1, 1_000_000),
+    rateLimitRefreshWindowMs: intFromEnv("RATE_LIMIT_REFRESH_WINDOW_MS", 900_000, 1_000, 86_400_000),
     rateLimitRegisterMax: intFromEnv("RATE_LIMIT_REGISTER_MAX", 5, 1, 1_000_000),
     rateLimitRegisterWindowMs: intFromEnv("RATE_LIMIT_REGISTER_WINDOW_MS", 3_600_000, 1_000, 86_400_000),
     rateLimitCheckoutMax: intFromEnv("RATE_LIMIT_CHECKOUT_MAX", 20, 1, 1_000_000),
@@ -215,7 +226,8 @@ const schema = z.object({
  * UPPERCASE. Parsing `process.env` directly would leave every field undefined —
  * so `DATABASE_URL` would be reported missing while genuinely set, and every
  * boolean/int would silently fall back to its default. `TRUST_PROXY` in
- * particular would always read as `false`, which in production is fatal.
+ * particular would always read as `false`, which silently disables per-client
+ * rate limiting behind a proxy.
  *
  * This map is the single translation point. Keeping it explicit (rather than
  * lowercasing every key) means `API_PUBLIC_URL` and `apiPublicUrl` cannot drift
@@ -229,6 +241,8 @@ const ENV_KEYS = {
     rateLimitGlobalWindowMs: "RATE_LIMIT_GLOBAL_WINDOW_MS",
     rateLimitAuthMax: "RATE_LIMIT_AUTH_MAX",
     rateLimitAuthWindowMs: "RATE_LIMIT_AUTH_WINDOW_MS",
+    rateLimitRefreshMax: "RATE_LIMIT_REFRESH_MAX",
+    rateLimitRefreshWindowMs: "RATE_LIMIT_REFRESH_WINDOW_MS",
     rateLimitRegisterMax: "RATE_LIMIT_REGISTER_MAX",
     rateLimitRegisterWindowMs: "RATE_LIMIT_REGISTER_WINDOW_MS",
     rateLimitCheckoutMax: "RATE_LIMIT_CHECKOUT_MAX",
@@ -286,13 +300,63 @@ if (!parsed.success) {
 }
 const raw = parsed.data;
 const corsOriginList = csvList.parse(raw.corsOrigins);
+/** Lower-cased hostname of an absolute URL, or undefined if it cannot be parsed. */
+const hostOf = (value) => {
+    if (!value)
+        return undefined;
+    try {
+        return new URL(value).hostname.toLowerCase();
+    }
+    catch {
+        return undefined;
+    }
+};
+/** Hosts for which a `Domain` attribute makes no sense (or is invalid). */
+const isLocalHost = (host) => host === "localhost" ||
+    host === "127.0.0.1" ||
+    host === "::1" ||
+    host.endsWith(".localhost") ||
+    /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host);
+const labelCount = (host) => host.split(".").length;
+/**
+ * Work out the shared `Domain` for the auth cookies.
+ *
+ * When the SPA is served from `etoile-dumatin.com` and calls an API at
+ * `api.etoile-dumatin.com`, a host-only cookie set by the API is invisible to
+ * `document.cookie` on the SPA. The double-submit CSRF check needs the SPA to
+ * read `edm_csrf`, so without a shared domain the `X-CSRF-Token` header is never
+ * populated and every `/api/auth/refresh` is rejected with a 403.
+ *
+ * Only the unambiguous case is auto-derived: the API host must be the SPA host
+ * with exactly one extra leading label (`api.<site>`). Anything else — deeper
+ * nesting, unrelated hosts, or a public-suffix domain like `co.uk` where a naive
+ * "last two labels" guess would be wrong — is left host-only and must be set
+ * explicitly via `COOKIE_DOMAIN`. An explicit value always wins.
+ */
+const deriveCookieDomain = (explicit) => {
+    if (explicit)
+        return explicit;
+    const apiHost = hostOf(raw.apiPublicUrl);
+    if (!apiHost || isLocalHost(apiHost))
+        return undefined;
+    for (const origin of corsOriginList) {
+        const webHost = hostOf(origin);
+        if (!webHost || isLocalHost(webHost) || webHost === apiHost)
+            continue;
+        if (apiHost.endsWith(`.${webHost}`) && labelCount(apiHost) === labelCount(webHost) + 1) {
+            return `.${webHost}`;
+        }
+    }
+    return undefined;
+};
+const derivedCookieDomain = deriveCookieDomain(raw.cookieDomain);
 export const env = Object.freeze({
     nodeEnv: raw.nodeEnv,
     port: raw.port,
     apiPublicUrl: raw.apiPublicUrl,
     corsOrigins: raw.corsOrigins,
     trustProxy: raw.trustProxy,
-    cookieDomain: raw.cookieDomain,
+    cookieDomain: derivedCookieDomain,
     databaseUrl: raw.databaseUrl,
     dbPoolSize: raw.dbPoolSize,
     databaseSslCa: raw.databaseSslCa,
@@ -301,6 +365,8 @@ export const env = Object.freeze({
     rateLimitGlobalWindowMs: raw.rateLimitGlobalWindowMs,
     rateLimitAuthMax: raw.rateLimitAuthMax,
     rateLimitAuthWindowMs: raw.rateLimitAuthWindowMs,
+    rateLimitRefreshMax: raw.rateLimitRefreshMax,
+    rateLimitRefreshWindowMs: raw.rateLimitRefreshWindowMs,
     rateLimitRegisterMax: raw.rateLimitRegisterMax,
     rateLimitRegisterWindowMs: raw.rateLimitRegisterWindowMs,
     rateLimitCheckoutMax: raw.rateLimitCheckoutMax,
@@ -348,15 +414,13 @@ export const env = Object.freeze({
         if (raw.nodeEnv !== "production")
             return;
         const problems = [];
-        // Allow test keys in production if explicitly configured as such? 
-        // But better to allow empty or test keys for now if no payments
-        if (raw.stripeSecretKey && !raw.stripeSecretKey.startsWith("sk_live_") && !raw.stripeSecretKey.startsWith("sk_test_")) {
-            problems.push("STRIPE_SECRET_KEY must be a live key (sk_live_...) in production");
+        // Stripe: an empty key is allowed (payments disabled), but a non-empty key
+        // that is neither a live nor a test key is almost certainly a paste error.
+        if (raw.stripeSecretKey &&
+            !raw.stripeSecretKey.startsWith("sk_live_") &&
+            !raw.stripeSecretKey.startsWith("sk_test_")) {
+            problems.push("STRIPE_SECRET_KEY must be a live key (sk_live_...) or test key (sk_test_...)");
         }
-        // Relax for now - allow localhost in certain cases? Or just skip this check if Stripe not in use
-        // if (corsOriginList.some((o) => o === "*" || o.includes("localhost") || o.includes("127.0.0.1"))) {
-        //   problems.push("CORS_ORIGINS must not contain wildcards or localhost origins in production");
-        // }
         if (raw.csrfSecret === raw.jwtSecret)
             problems.push("CSRF_SECRET must differ from JWT_SECRET");
         if (raw.passwordPepper === raw.jwtSecret)
@@ -364,9 +428,10 @@ export const env = Object.freeze({
         if (/change|placeholder|example|your[_-]?secret/i.test(raw.jwtSecret)) {
             problems.push("JWT_SECRET still looks like a placeholder");
         }
-        // if (!raw.trustProxy) {
-        //   problems.push("TRUST_PROXY must be enabled in production so rate limiting sees the real client IP");
-        // }
+        // Deliberately NOT a hard failure: refusing to boot while a proxy in front is
+        // misconfigured would take the whole API down. But with TRUST_PROXY off in
+        // production every rate limiter shares one IP bucket (middleware/security.ts),
+        // so it must be true behind Passenger/nginx.
         if (problems.length > 0) {
             throw new Error(`Refusing to start in production:\n${problems.map((p) => `  • ${p}`).join("\n")}`);
         }

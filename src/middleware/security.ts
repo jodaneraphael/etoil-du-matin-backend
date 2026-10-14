@@ -179,6 +179,21 @@ export const authLimiter = rateLimit(
   limit(env.rateLimitAuthWindowMs, env.rateLimitAuthMax, "Too many authentication attempts. Please try again later."),
 );
 
+/**
+ * Refresh-token rotation. Deliberately separate from (and looser than) the
+ * credential limiter: the SPA calls `/api/auth/refresh` on every page load to
+ * restore the session, so sharing the 10-per-15-minute login bucket would let
+ * ordinary browsing lock out sign-in. The refresh token is 256-bit and guarded
+ * by the CSRF double-submit, so this is DoS protection, not guess resistance.
+ */
+export const refreshLimiter = rateLimit(
+  limit(
+    env.rateLimitRefreshWindowMs,
+    env.rateLimitRefreshMax,
+    "Too many session refreshes. Please wait a moment.",
+  ),
+);
+
 /** Registration is stricter still — bot-driven signup is the common abuse. */
 export const registerLimiter = rateLimit(
   limit(env.rateLimitRegisterWindowMs, env.rateLimitRegisterMax, "Too many accounts created from this address."),

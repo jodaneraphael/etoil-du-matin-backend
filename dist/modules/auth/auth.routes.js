@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { requireCsrf } from "../../middleware/csrf.js";
 import { requireAuth } from "../../middleware/auth.js";
-import { authLimiter, registerLimiter, writeLimiter } from "../../middleware/security.js";
+import { authLimiter, refreshLimiter, registerLimiter, writeLimiter } from "../../middleware/security.js";
 import { asyncHandler, params, requireAuthContext, validateRequest } from "../../middleware/validate.js";
 import { AppError, invalidCredentials } from "../../lib/errors.js";
 import { REFRESH_COOKIE } from "../../lib/tokens.js";
@@ -46,7 +46,7 @@ authRouter.post("/login", authLimiter, validateRequest({ body: loginSchema }), a
  * httpOnly refresh cookie rather than a bearer token. Rotating also means a
  * stolen token is single-use and its reuse is detected on the next attempt.
  */
-authRouter.post("/refresh", requireCsrf, authLimiter, asyncHandler(async (req, res) => {
+authRouter.post("/refresh", requireCsrf, refreshLimiter, asyncHandler(async (req, res) => {
     const token = req.cookies?.[REFRESH_COOKIE];
     if (typeof token !== "string" || token.length === 0) {
         throw invalidCredentials();

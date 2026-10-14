@@ -27,9 +27,10 @@ export const createApp = () => {
     const app = express();
     // Behind a reverse proxy, `req.ip` must come from X-Forwarded-For or every
     // rate limiter and lockout sees the proxy's address and throttles all users
-    // together. Only enable this when a proxy you control sets that header — a
-    // blind `true` lets any client spoof its IP. Production refuses to boot
-    // without it, and env.assertProductionSafety enforces that.
+    // together. Keep it false when the app is directly exposed; enable it only
+    // when a proxy you control overwrites that header. This is NOT enforced at
+    // boot today (see env.assertProductionSafety), so a production deployment
+    // behind Passenger/nginx must set TRUST_PROXY=true itself.
     app.set("trust proxy", env.trustProxy);
     // Rate limiting is applied before body parsing so an oversized or slow body
     // cannot be used to bypass the limit.

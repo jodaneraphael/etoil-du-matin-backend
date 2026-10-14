@@ -177,6 +177,15 @@ const schema = z.object({
   rateLimitGlobalWindowMs: intFromEnv("RATE_LIMIT_GLOBAL_WINDOW_MS", 60_000, 1_000, 86_400_000),
   rateLimitAuthMax: intFromEnv("RATE_LIMIT_AUTH_MAX", 10, 1, 1_000_000),
   rateLimitAuthWindowMs: intFromEnv("RATE_LIMIT_AUTH_WINDOW_MS", 900_000, 1_000, 86_400_000),
+  /**
+   * Refresh-token rotation runs on every page load (the SPA silently restores
+   * the session), so it must not share the tight credential bucket above — a
+   * normal browsing session would spend the login budget and lock out sign-in.
+   * The token is 256-bit and CSRF-guarded, so this ceiling is DoS protection,
+   * not guess resistance.
+   */
+  rateLimitRefreshMax: intFromEnv("RATE_LIMIT_REFRESH_MAX", 60, 1, 1_000_000),
+  rateLimitRefreshWindowMs: intFromEnv("RATE_LIMIT_REFRESH_WINDOW_MS", 900_000, 1_000, 86_400_000),
   rateLimitRegisterMax: intFromEnv("RATE_LIMIT_REGISTER_MAX", 5, 1, 1_000_000),
   rateLimitRegisterWindowMs: intFromEnv("RATE_LIMIT_REGISTER_WINDOW_MS", 3_600_000, 1_000, 86_400_000),
   rateLimitCheckoutMax: intFromEnv("RATE_LIMIT_CHECKOUT_MAX", 20, 1, 1_000_000),
@@ -249,7 +258,8 @@ const schema = z.object({
  * UPPERCASE. Parsing `process.env` directly would leave every field undefined —
  * so `DATABASE_URL` would be reported missing while genuinely set, and every
  * boolean/int would silently fall back to its default. `TRUST_PROXY` in
- * particular would always read as `false`, which in production is fatal.
+ * particular would always read as `false`, which silently disables per-client
+ * rate limiting behind a proxy.
  *
  * This map is the single translation point. Keeping it explicit (rather than
  * lowercasing every key) means `API_PUBLIC_URL` and `apiPublicUrl` cannot drift
@@ -263,6 +273,8 @@ const ENV_KEYS = {
   rateLimitGlobalWindowMs: "RATE_LIMIT_GLOBAL_WINDOW_MS",
   rateLimitAuthMax: "RATE_LIMIT_AUTH_MAX",
   rateLimitAuthWindowMs: "RATE_LIMIT_AUTH_WINDOW_MS",
+  rateLimitRefreshMax: "RATE_LIMIT_REFRESH_MAX",
+  rateLimitRefreshWindowMs: "RATE_LIMIT_REFRESH_WINDOW_MS",
   rateLimitRegisterMax: "RATE_LIMIT_REGISTER_MAX",
   rateLimitRegisterWindowMs: "RATE_LIMIT_REGISTER_WINDOW_MS",
   rateLimitCheckoutMax: "RATE_LIMIT_CHECKOUT_MAX",
@@ -406,6 +418,8 @@ export const env = Object.freeze({
   rateLimitGlobalWindowMs: raw.rateLimitGlobalWindowMs,
   rateLimitAuthMax: raw.rateLimitAuthMax,
   rateLimitAuthWindowMs: raw.rateLimitAuthWindowMs,
+  rateLimitRefreshMax: raw.rateLimitRefreshMax,
+  rateLimitRefreshWindowMs: raw.rateLimitRefreshWindowMs,
   rateLimitRegisterMax: raw.rateLimitRegisterMax,
   rateLimitRegisterWindowMs: raw.rateLimitRegisterWindowMs,
   rateLimitCheckoutMax: raw.rateLimitCheckoutMax,
@@ -461,23 +475,27 @@ export const env = Object.freeze({
     if (raw.nodeEnv !== "production") return;
 
     const problems: string[] = [];
-    // Allow test keys in production if explicitly configured as such? 
-    // But better to allow empty or test keys for now if no payments
-    if (raw.stripeSecretKey && !raw.stripeSecretKey.startsWith("sk_live_") && !raw.stripeSecretKey.startsWith("sk_test_")) {
-      problems.push("STRIPE_SECRET_KEY must be a live key (sk_live_...) in production");
+
+    // Stripe: an empty key is allowed (payments disabled), but a non-empty key
+    // that is neither a live nor a test key is almost certainly a paste error.
+    if (
+      raw.stripeSecretKey &&
+      !raw.stripeSecretKey.startsWith("sk_live_") &&
+      !raw.stripeSecretKey.startsWith("sk_test_")
+    ) {
+      problems.push("STRIPE_SECRET_KEY must be a live key (sk_live_...) or test key (sk_test_...)");
     }
-    // Relax for now - allow localhost in certain cases? Or just skip this check if Stripe not in use
-    // if (corsOriginList.some((o) => o === "*" || o.includes("localhost") || o.includes("127.0.0.1"))) {
-    //   problems.push("CORS_ORIGINS must not contain wildcards or localhost origins in production");
-    // }
+
     if (raw.csrfSecret === raw.jwtSecret) problems.push("CSRF_SECRET must differ from JWT_SECRET");
     if (raw.passwordPepper === raw.jwtSecret) problems.push("PASSWORD_PEPPER must differ from JWT_SECRET");
     if (/change|placeholder|example|your[_-]?secret/i.test(raw.jwtSecret)) {
       problems.push("JWT_SECRET still looks like a placeholder");
     }
-    // if (!raw.trustProxy) {
-    //   problems.push("TRUST_PROXY must be enabled in production so rate limiting sees the real client IP");
-    // }
+
+    // Deliberately NOT a hard failure: refusing to boot while a proxy in front is
+    // misconfigured would take the whole API down. But with TRUST_PROXY off in
+    // production every rate limiter shares one IP bucket (middleware/security.ts),
+    // so it must be true behind Passenger/nginx.
 
     if (problems.length > 0) {
       throw new Error(`Refusing to start in production:\n${problems.map((p) => `  • ${p}`).join("\n")}`);

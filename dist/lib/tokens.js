@@ -15,6 +15,8 @@ export const REFRESH_COOKIE = "edm_rt";
  */
 export const CSRF_COOKIE = "edm_csrf";
 const MAX_REFRESH_MS = env.refreshTokenTtlDays * 24 * 60 * 60 * 1000;
+/** Shared `Domain`, or nothing when cookies should stay host-only. */
+const SHARED_DOMAIN = env.cookieDomain ? { domain: env.cookieDomain } : {};
 /**
  * Cookie hardening:
  *
@@ -36,22 +38,41 @@ const REFRESH_COOKIE_OPTIONS = {
     sameSite: "strict",
     secure: env.isProduction,
     path: "/api/auth",
-    domain: env.cookieDomain,
+    ...SHARED_DOMAIN,
+};
+const CSRF_COOKIE_OPTIONS = {
+    httpOnly: false,
+    sameSite: "strict",
+    secure: env.isProduction,
+    path: "/",
+    ...SHARED_DOMAIN,
+};
+/**
+ * Delete the host-only variant of both auth cookies.
+ *
+ * Needed only while transitioning to a shared `COOKIE_DOMAIN`: a browser that
+ * logged in before the change still holds host-only `edm_rt`/`edm_csrf` cookies,
+ * and would then send *two* cookies of the same name. `cookie-parser` keeps the
+ * first, which may be the stale host-only one, so the server could read a
+ * refresh token it has already rotated away from — surfacing as a spurious
+ * reuse-detection logout. Clearing the host-only copies on the next auth
+ * response removes the ambiguity.
+ */
+const clearHostOnlyVariants = (res) => {
+    if (!env.cookieDomain)
+        return;
+    res.clearCookie(REFRESH_COOKIE, { ...REFRESH_COOKIE_OPTIONS, domain: undefined });
+    res.clearCookie(CSRF_COOKIE, { ...CSRF_COOKIE_OPTIONS, domain: undefined });
 };
 export const setAuthCookies = (res, tokens) => {
+    clearHostOnlyVariants(res);
     res.cookie(REFRESH_COOKIE, tokens.refreshToken, { ...REFRESH_COOKIE_OPTIONS, maxAge: MAX_REFRESH_MS });
-    res.cookie(CSRF_COOKIE, tokens.csrfToken, {
-        httpOnly: false,
-        sameSite: "strict",
-        secure: env.isProduction,
-        path: "/",
-        domain: env.cookieDomain,
-        maxAge: MAX_REFRESH_MS,
-    });
+    res.cookie(CSRF_COOKIE, tokens.csrfToken, { ...CSRF_COOKIE_OPTIONS, maxAge: MAX_REFRESH_MS });
 };
 export const clearAuthCookies = (res) => {
     res.clearCookie(REFRESH_COOKIE, REFRESH_COOKIE_OPTIONS);
-    res.clearCookie(CSRF_COOKIE, { ...REFRESH_COOKIE_OPTIONS, httpOnly: false, path: "/" });
+    res.clearCookie(CSRF_COOKIE, CSRF_COOKIE_OPTIONS);
+    clearHostOnlyVariants(res);
 };
 const buildRefreshRecord = (userId, familyId, client) => {
     const refreshToken = randomToken(32);

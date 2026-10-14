@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { requireCsrf } from "../../middleware/csrf.js";
 import { requireAuth } from "../../middleware/auth.js";
-import { authLimiter, registerLimiter, writeLimiter } from "../../middleware/security.js";
+import { authLimiter, refreshLimiter, registerLimiter, writeLimiter } from "../../middleware/security.js";
 import { asyncHandler, params, requireAuthContext, validateRequest } from "../../middleware/validate.js";
 import { AppError, invalidCredentials } from "../../lib/errors.js";
 import { REFRESH_COOKIE } from "../../lib/tokens.js";
@@ -75,7 +75,7 @@ authRouter.post(
 authRouter.post(
   "/refresh",
   requireCsrf,
-  authLimiter,
+  refreshLimiter,
   asyncHandler(async (req, res) => {
     const token = req.cookies?.[REFRESH_COOKIE];
     if (typeof token !== "string" || token.length === 0) {

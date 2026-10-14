@@ -62,6 +62,15 @@ const start = async (): Promise<void> => {
     fatal("Refusing to start: unsafe production configuration.", error);
   }
 
+  // Not fatal — a deployment may legitimately have no proxy in front — but with
+  // TRUST_PROXY off behind a shared proxy every rate limiter keys on the proxy's
+  // address, so a single visitor's traffic can exhaust the budget for everyone.
+  if (env.isProduction && !env.trustProxy) {
+    logger.warn(
+      "TRUST_PROXY is disabled in production: rate limits and lockouts are shared across all clients. Set TRUST_PROXY=true when running behind Passenger/nginx.",
+    );
+  }
+
   try {
     await db.execute("SELECT 1");
   } catch (error) {
