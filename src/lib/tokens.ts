@@ -1,5 +1,5 @@
 import type { InferInsertModel } from "drizzle-orm";
-import { and, eq, inArray, isNotNull, isNull, lt } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNotNull, isNull, lt } from "drizzle-orm";
 import { db, type Tx } from "../db/client.js";
 import { refreshTokens, sessions, users, type UserRole } from "../db/schema.js";
 import { env } from "../env.js";
@@ -262,8 +262,9 @@ export const rotateRefreshToken = async (
  * rides alongside the live domain-scoped one, and choosing by header order would
  * pick the dead one. Selecting the active candidate makes that benign.
  *
- * Reuse detection is unchanged. If none of the candidates is active — the normal
- * case for a genuinely replayed token — the family is revoked exactly as before.
+ * Reuse detection is unchanged outside the grace window. If none of the
+ * candidates is active and none was rotated moments ago (see
+ * `env.refreshReuseGraceSeconds`), the family is revoked exactly as before.
  */
 export const rotateRefreshTokens = async (
   presentedTokens: string[],
@@ -291,7 +292,49 @@ export const rotateRefreshTokens = async (
       .for("update");
 
     const now = Date.now();
-    const row = rows.find((candidate) => candidate.revokedAt === null && candidate.expiresAt.getTime() > now);
+    let row = rows.find((candidate) => candidate.revokedAt === null && candidate.expiresAt.getTime() > now);
+
+    /**
+     * Benign-duplicate recovery. See `env.refreshReuseGraceSeconds`.
+     *
+     * No live candidate was presented, but if one of them was retired by a
+     * rotation moments ago and its family still has a live successor, this is a
+     * client that raced itself (two tabs, a retried request) — not a thief.
+     * Rotate the live successor so the caller still ends up authenticated; the
+     * family is left intact. A replay outside the window is handled by the
+     * reuse path below, unchanged.
+     */
+    if (!row && env.refreshReuseGraceSeconds > 0) {
+      const graceMs = env.refreshReuseGraceSeconds * 1000;
+      const recentlyRotated = rows.find(
+        (candidate) =>
+          candidate.revokedAt !== null &&
+          candidate.revokedReason === "rotated" &&
+          now - candidate.revokedAt.getTime() <= graceMs,
+      );
+      if (recentlyRotated) {
+        const [live] = await tx
+          .select()
+          .from(refreshTokens)
+          .where(
+            and(
+              eq(refreshTokens.familyId, recentlyRotated.familyId),
+              isNull(refreshTokens.revokedAt),
+              gt(refreshTokens.expiresAt, new Date(now)),
+            ),
+          )
+          .orderBy(desc(refreshTokens.createdAt))
+          .limit(1)
+          .for("update");
+        if (live) {
+          row = live;
+          logger.info(
+            { familyId: live.familyId, userId: live.userId },
+            "refresh token replay within grace window; rotating the live successor",
+          );
+        }
+      }
+    }
 
     if (!row) {
       // No live token among the candidates. Prefer the theft signal: a revoked

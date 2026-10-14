@@ -2,10 +2,10 @@ import "dotenv/config";
 import { spawn, type ChildProcess } from "node:child_process";
 
 /**
- * Hermetic runner for the integration smoke suite.
+ * Hermetic runner for the integration smoke suites.
  *
- * The suite starts a real API server, so it starts its own. The auth rate
- * limiters (5 registrations per hour, 10 auth attempts per 15 minutes) are
+ * The suites start a real API server, so this runner starts its own. The auth
+ * rate limiters (5 registrations per hour, 10 auth attempts per 15 minutes) are
  * per-process and in-memory, which is correct for production but means a suite
  * that runs several times against one long-lived dev server eventually trips its
  * own throttling and reports 429s that are not defects. Booting a throwaway
@@ -13,11 +13,18 @@ import { spawn, type ChildProcess } from "node:child_process";
  *
  * Registration and login are still exercised against the real limiters, so the
  * throttling itself stays covered.
+ *
+ * Two servers are used because one setting cannot be varied within a process:
+ * `REFRESH_REUSE_GRACE_SECONDS`. The main suite asserts strict single-use
+ * rotation (grace 0); `scripts/smoke-grace.ts` asserts the benign-duplicate
+ * recovery (grace > 0) on a second server.
  */
 
-const PORT = Number(process.env.SMOKE_PORT ?? 4199);
-const BASE = `http://127.0.0.1:${PORT}`;
+const SMOKE_PORT = Number(process.env.SMOKE_PORT ?? 4199);
+const GRACE_PORT = SMOKE_PORT + 1;
 const BOOT_TIMEOUT_MS = 60_000;
+
+const base = (port: number) => `http://127.0.0.1:${port}`;
 
 const run = (command: string, args: string[], env: NodeJS.ProcessEnv) =>
   new Promise<number>((resolve) => {
@@ -29,11 +36,11 @@ const run = (command: string, args: string[], env: NodeJS.ProcessEnv) =>
     child.on("exit", (code) => resolve(code ?? 1));
   });
 
-const waitForReady = async (): Promise<boolean> => {
+const waitForReady = async (port: number): Promise<boolean> => {
   const deadline = Date.now() + BOOT_TIMEOUT_MS;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(`${BASE}/readyz`);
+      const response = await fetch(`${base(port)}/readyz`);
       if (response.ok) {
         const body = (await response.json()) as { status?: string };
         if (body.status === "ready") return true;
@@ -68,20 +75,20 @@ const killServer = async (child: ChildProcess): Promise<void> => {
   child.kill("SIGKILL");
 };
 
-const portInUse = async (): Promise<boolean> => {
+const portInUse = async (port: number): Promise<boolean> => {
   try {
     // A successful connect means something is already serving here.
-    await fetch(`${BASE}/readyz`, { signal: AbortSignal.timeout(1500) });
+    await fetch(`${base(port)}/readyz`, { signal: AbortSignal.timeout(1500) });
     return true;
   } catch {
     return false;
   }
 };
 
-if (await portInUse()) {
+if ((await portInUse(SMOKE_PORT)) || (await portInUse(GRACE_PORT))) {
   console.error(
-    `Port ${PORT} is already serving. That is almost certainly a leftover test ` +
-      "server from an interrupted run; stop it (or set SMOKE_PORT) before retrying.",
+    `Port ${SMOKE_PORT} (or ${GRACE_PORT}) is already serving. That is almost certainly a ` +
+      "leftover test server from an interrupted run; stop it (or set SMOKE_PORT) before retrying.",
   );
   process.exit(1);
 }
@@ -104,37 +111,34 @@ if (prepare !== 0) {
   process.exit(1);
 }
 
-const server = spawn("npx", ["tsx", "src/index.ts"], {
-  env: {
-    ...process.env,
-    PORT: String(PORT),
-    SMOKE_BASE: BASE,
-    // The suite exercises authentication more times than a real user would in a
-    // quarter of an hour, so the production ceilings would throttle the test
-    // itself. These are raised, not disabled: the checkout limiter is left at its
-    // real value and the suite deliberately exhausts it, so throttling is still
-    // proven rather than assumed.
-    RATE_LIMIT_AUTH_MAX: "500",
-    RATE_LIMIT_REGISTER_MAX: "500",
-    // The contact and newsletter suite makes a dozen-plus writes, well past the
-    // production ceiling of 5/hour. Left at its real value, the assertions past
-    // the fifth would all be measuring the limiter rather than the endpoints.
-    RATE_LIMIT_CONTACT_MAX: "500",
-  },
-  stdio: ["ignore", "ignore", "inherit"],
-  shell: process.platform === "win32",
-});
+/** Boot a throwaway API server on `port`, returning the child handle. */
+const startServer = (port: number, extraEnv: NodeJS.ProcessEnv): ChildProcess =>
+  spawn("npx", ["tsx", "src/index.ts"], {
+    env: { ...process.env, PORT: String(port), SMOKE_BASE: base(port), ...extraEnv },
+    stdio: ["ignore", "ignore", "inherit"],
+    shell: process.platform === "win32",
+  });
 
 /**
- * Stop the server, and wait for it.
+ * The limits the suite has to live within.
  *
- * This must be awaited before exiting. `process.exit()` tears the runner down
- * synchronously, so a fire-and-forget `taskkill` gets abandoned mid-flight and
- * leaves the `node` child listening — which then makes the *next* run abort on
- * the busy-port check, or worse, silently test against the previous process.
+ * The suite exercises authentication more times than a real user would in a
+ * quarter of an hour, so the production ceilings would throttle the test itself.
+ * These are raised, not disabled: the checkout limiter is left at its real value
+ * and the suite deliberately exhausts it, so throttling is still proven rather
+ * than assumed. Grace is pinned to 0 so the strict single-use rotation
+ * assertions hold regardless of NODE_ENV or a developer's .env.
  */
+const SUITE_ENV: NodeJS.ProcessEnv = {
+  RATE_LIMIT_AUTH_MAX: "500",
+  RATE_LIMIT_REGISTER_MAX: "500",
+  RATE_LIMIT_CONTACT_MAX: "500",
+  REFRESH_REUSE_GRACE_SECONDS: "0",
+};
+
+const servers: ChildProcess[] = [];
 const shutdown = async (): Promise<void> => {
-  await killServer(server);
+  for (const server of servers) await killServer(server);
 };
 
 process.on("SIGINT", () => {
@@ -142,16 +146,40 @@ process.on("SIGINT", () => {
 });
 
 try {
-  const ready = await waitForReady();
-  if (!ready) {
-    console.error(`\nThe API never became ready on ${BASE} within ${BOOT_TIMEOUT_MS / 1000}s.`);
+  // ── Phase 1: strict rotation, grace window disabled ────────────────────────
+  const main = startServer(SMOKE_PORT, SUITE_ENV);
+  servers.push(main);
+  if (!(await waitForReady(SMOKE_PORT))) {
+    console.error(`\nThe API never became ready on ${base(SMOKE_PORT)} within ${BOOT_TIMEOUT_MS / 1000}s.`);
     await shutdown();
     process.exit(1);
   }
 
-  const code = await run("npx", ["tsx", "scripts/smoke.ts"], { ...process.env, SMOKE_BASE: BASE });
+  const code = await run("npx", ["tsx", "scripts/smoke.ts"], { ...process.env, SMOKE_BASE: base(SMOKE_PORT) });
+  await killServer(main);
+
+  if (code !== 0) {
+    await shutdown();
+    process.exit(code);
+  }
+
+  // ── Phase 2: benign-duplicate recovery, grace window enabled ───────────────
+  // A 2s window keeps the suite fast (it sleeps just past it to prove the
+  // outside-grace replay is still treated as theft).
+  const grace = startServer(GRACE_PORT, { ...SUITE_ENV, REFRESH_REUSE_GRACE_SECONDS: "2" });
+  servers.push(grace);
+  if (!(await waitForReady(GRACE_PORT))) {
+    console.error(`\nThe grace API never became ready on ${base(GRACE_PORT)} within ${BOOT_TIMEOUT_MS / 1000}s.`);
+    await shutdown();
+    process.exit(1);
+  }
+
+  const graceCode = await run("npx", ["tsx", "scripts/smoke-grace.ts"], {
+    ...process.env,
+    SMOKE_BASE: base(GRACE_PORT),
+  });
   await shutdown();
-  process.exit(code);
+  process.exit(graceCode);
 } catch (error) {
   console.error(error);
   await shutdown();

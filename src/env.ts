@@ -101,6 +101,18 @@ const stripeKey = (label: string) =>
       message: `${label} does not look like a Stripe key (expected sk_ or pk_ followed by test or live)`,
     });
 
+/**
+ * Default for `REFRESH_REUSE_GRACE_SECONDS`.
+ *
+ * On in production so a benign duplicate refresh (two tabs racing, a retried
+ * request) does not sign the user out; off everywhere else so the integration
+ * suite and local development keep asserting strict single-use rotation. Read
+ * straight from `process.env` because this fallback has to depend on NODE_ENV and
+ * `intFromEnv` takes a fixed value; `dotenv/config` has already run by the time
+ * this module is imported (see `index.ts`).
+ */
+const defaultReuseGraceSeconds = process.env.NODE_ENV === "production" ? 30 : 0;
+
 const schema = z.object({
   nodeEnv: z.enum(["development", "test", "production"]).default("development"),
   port: intFromEnv("PORT", 4000, 1, 65535),
@@ -212,6 +224,29 @@ const schema = z.object({
   refreshTokenTtlDays: intFromEnv("REFRESH_TOKEN_TTL_DAYS", 30, 1, 365),
 
   /**
+   * Grace window for idempotent refresh rotation.
+   *
+   * Rotation is single-use: presenting a token that was already rotated away
+   * from is the signature of a stolen copy, so the whole family is normally
+   * revoked. But a legitimate client can present the same token twice in quick
+   * succession — two tabs each silently restoring the session, or a request the
+   * browser retried — and locking the user out for that is a false positive.
+   *
+   * Within this window a token that was retired *by a rotation* and still has a
+   * live successor in its family is treated as that benign duplicate: the live
+   * successor is rotated instead, so the client converges on a working token
+   * rather than losing its session. A replay outside the window — the realistic
+   * theft scenario — still revokes the family. Set to 0 to disable and restore
+   * strict single-use behaviour.
+   */
+  refreshReuseGraceSeconds: intFromEnv(
+    "REFRESH_REUSE_GRACE_SECONDS",
+    defaultReuseGraceSeconds,
+    0,
+    3600,
+  ),
+
+  /**
    * How long checkout holds a stock reservation before giving it up.
    *
    * The trade-off is direct: too short and a shopper who is mid-3-D-Secure loses
@@ -302,6 +337,7 @@ const ENV_KEYS = {
 
   accessTokenTtlSeconds: "ACCESS_TOKEN_TTL_SECONDS",
   refreshTokenTtlDays: "REFRESH_TOKEN_TTL_DAYS",
+  refreshReuseGraceSeconds: "REFRESH_REUSE_GRACE_SECONDS",
   pendingOrderTtlMinutes: "PENDING_ORDER_TTL_MINUTES",
   orderSweepBatchSize: "ORDER_SWEEP_BATCH_SIZE",
   orderSweepIntervalMs: "ORDER_SWEEP_INTERVAL_MS",
@@ -437,6 +473,7 @@ export const env = Object.freeze({
 
   accessTokenTtlSeconds: raw.accessTokenTtlSeconds,
   refreshTokenTtlDays: raw.refreshTokenTtlDays,
+  refreshReuseGraceSeconds: raw.refreshReuseGraceSeconds,
   pendingOrderTtlMinutes: raw.pendingOrderTtlMinutes,
   orderSweepBatchSize: raw.orderSweepBatchSize,
   orderSweepIntervalMs: raw.orderSweepIntervalMs,
